@@ -18,17 +18,28 @@ import (
 //
 // A WaitGroup must not be copied after first use.
 type WaitGroup struct {
-	noCopy noCopy
+	noCopy noCopy // 第一次使用后，WaitGroup 就不能再被拷贝了！
 
 	// 64-bit value: high 32 bits are counter, low 32 bits are waiter count.
 	// 64-bit atomic operations require 64-bit alignment, but 32-bit
 	// compilers do not ensure it. So we allocate 12 bytes and then use
 	// the aligned 8 bytes in them as state, and the other 4 as storage
 	// for the sema.
+	//
+	// 64-bit 值：高 32 位是计数器，低 32 位是 waiter 的数量
+	// 64-bit 原子操作需要 8 字节对齐（64-bit 对齐），但是 32-bit 编译器不保证这一点
+	// 所以这里申请了 12 bytes，然后使用对齐的 8 字节作为 state，其它 4 字节作为 sema 存储
 	state1 [3]uint32
 }
 
 // state returns pointers to the state and sema fields stored within wg.state1.
+// 因为编译器分配给 wg.state1 的地址可能是 8 字节对齐的，也可能不是：
+// 1. 当地址就是 8 字节对齐时，则前两位可作为一个 uint64 使用，最后一位存储 sema
+// 2. 当地址非 8 字节对齐时，则将 sema 存在第一个 slot，剩下两个作为 uint64 使用
+// 0       4        8        12        16
+// |-------|--------|--------|---------|
+// |     state      |  sema  |
+//         | sema   |        state     |
 func (wg *WaitGroup) state() (statep *uint64, semap *uint32) {
 	if uintptr(unsafe.Pointer(&wg.state1))%8 == 0 {
 		return (*uint64)(unsafe.Pointer(&wg.state1)), &wg.state1[2]
@@ -47,6 +58,7 @@ func (wg *WaitGroup) state() (statep *uint64, semap *uint32) {
 // at any time.
 // Typically this means the calls to Add should execute before the statement
 // creating the goroutine or other event to be waited for.
+// 通常是需要在创建 goroutine 之前就调用 Add，然后再去 Wait。
 // If a WaitGroup is reused to wait for several independent sets of events,
 // new Add calls must happen after all previous Wait calls have returned.
 // See the WaitGroup example.
@@ -61,7 +73,7 @@ func (wg *WaitGroup) Add(delta int) {
 		race.Disable()
 		defer race.Enable()
 	}
-	state := atomic.AddUint64(statep, uint64(delta)<<32)
+	state := atomic.AddUint64(statep, uint64(delta)<<32) // 使用高位计数
 	v := int32(state >> 32)
 	w := uint32(state)
 	if race.Enabled && delta > 0 && v == int32(delta) {
